@@ -1,0 +1,7 @@
+InheritParentConfig: false
+# Disable most checks as this is third-party code
+# Have to enable at least one check, so pick a benign one!
+
+Checks: '-*,misc-definitions-in-headers'
+CheckOptions:
+  - { key: HeaderFileExtensions,          value: "x" }
