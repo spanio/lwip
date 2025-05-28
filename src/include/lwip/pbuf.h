@@ -247,6 +247,7 @@ struct pbuf_custom {
   struct pbuf pbuf;
   /** This function is called when pbuf_free deallocates this pbuf(_custom) */
   pbuf_free_custom_fn custom_free_function;
+  char thread_name[3];
 };
 #endif /* LWIP_SUPPORT_CUSTOM_PBUF */
 
