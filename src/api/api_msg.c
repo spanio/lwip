@@ -190,15 +190,25 @@ recv_raw(void *arg, struct raw_pcb *pcb, struct pbuf *p,
       buf->port = pcb->protocol;
 
       len = q->tot_len;
-      if (sys_mbox_trypost(&conn->recvmbox, buf) != ERR_OK) {
-        netbuf_delete(buf);
-        return 0;
-      } else {
+      {
+        SYS_ARCH_DECL_PROTECT(lev);
+        /* G3P-23754: Hold SYS_ARCH_PROTECT across sys_mbox_trypost AND
+           API_EVENT(NETCONN_EVT_RCVPLUS) so a reader inspecting sock->rcvevent
+           under the same lock cannot observe (mbox has buf, rcvevent == 0).
+           Requires the port's lwip_sys_mutex to be recursive (as
+           sys_arch_protect() is documented to support). */
+        SYS_ARCH_PROTECT(lev);
+        if (sys_mbox_trypost(&conn->recvmbox, buf) != ERR_OK) {
+          SYS_ARCH_UNPROTECT(lev);
+          netbuf_delete(buf);
+          return 0;
+        }
 #if LWIP_SO_RCVBUF
         SYS_ARCH_INC(conn->recv_avail, len);
 #endif /* LWIP_SO_RCVBUF */
         /* Register event with callback */
         API_EVENT(conn, NETCONN_EVT_RCVPLUS, len);
+        SYS_ARCH_UNPROTECT(lev);
       }
     }
   }
@@ -270,17 +280,30 @@ recv_udp(void *arg, struct udp_pcb *pcb, struct pbuf *p,
   }
 
   len = p->tot_len;
-  err = sys_mbox_trypost(&conn->recvmbox, buf);
-  if (err != ERR_OK) {
-    netbuf_delete(buf);
-    LWIP_DEBUGF(API_MSG_DEBUG, ("recv_udp: sys_mbox_trypost failed, err=%d\n", err));
-    return;
-  } else {
+  {
+    SYS_ARCH_DECL_PROTECT(lev);
+    /* G3P-23754: Hold SYS_ARCH_PROTECT across sys_mbox_trypost AND
+       API_EVENT(NETCONN_EVT_RCVPLUS) so a reader inspecting sock->rcvevent
+       under the same lock cannot observe (mbox has buf, rcvevent == 0).
+       Without this wrap the producer can be preempted between the two,
+       leaving lwip_pollscan to report nothing readable on a socket whose
+       recvmbox already holds a netbuf -- the broker then sleeps until the
+       next signal nudges it. Requires the port's lwip_sys_mutex to be
+       recursive (as sys_arch_protect() is documented to support). */
+    SYS_ARCH_PROTECT(lev);
+    err = sys_mbox_trypost(&conn->recvmbox, buf);
+    if (err != ERR_OK) {
+      SYS_ARCH_UNPROTECT(lev);
+      netbuf_delete(buf);
+      LWIP_DEBUGF(API_MSG_DEBUG, ("recv_udp: sys_mbox_trypost failed, err=%d\n", err));
+      return;
+    }
 #if LWIP_SO_RCVBUF
     SYS_ARCH_INC(conn->recv_avail, len);
 #endif /* LWIP_SO_RCVBUF */
     /* Register event with callback */
     API_EVENT(conn, NETCONN_EVT_RCVPLUS, len);
+    SYS_ARCH_UNPROTECT(lev);
   }
 }
 #endif /* LWIP_UDP */
@@ -331,15 +354,25 @@ recv_tcp(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
     len = 0;
   }
 
-  if (sys_mbox_trypost(&conn->recvmbox, msg) != ERR_OK) {
-    /* don't deallocate p: it is presented to us later again from tcp_fasttmr! */
-    return ERR_MEM;
-  } else {
+  {
+    SYS_ARCH_DECL_PROTECT(lev);
+    /* G3P-23754: Hold SYS_ARCH_PROTECT across sys_mbox_trypost AND
+       API_EVENT(NETCONN_EVT_RCVPLUS) so a reader inspecting sock->rcvevent
+       under the same lock cannot observe (mbox has msg, rcvevent == 0).
+       Requires the port's lwip_sys_mutex to be recursive (as
+       sys_arch_protect() is documented to support). */
+    SYS_ARCH_PROTECT(lev);
+    if (sys_mbox_trypost(&conn->recvmbox, msg) != ERR_OK) {
+      SYS_ARCH_UNPROTECT(lev);
+      /* don't deallocate p: it is presented to us later again from tcp_fasttmr! */
+      return ERR_MEM;
+    }
 #if LWIP_SO_RCVBUF
     SYS_ARCH_INC(conn->recv_avail, len);
 #endif /* LWIP_SO_RCVBUF */
     /* Register event with callback */
     API_EVENT(conn, NETCONN_EVT_RCVPLUS, len);
+    SYS_ARCH_UNPROTECT(lev);
   }
 
   return ERR_OK;
