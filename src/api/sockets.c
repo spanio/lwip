@@ -1902,11 +1902,12 @@ lwip_selscan(int maxfdp1, fd_set *readset_in, fd_set *writeset_in, fd_set *excep
       u16_t sendevent = sock->sendevent;
       u16_t errevent = sock->errevent;
 #if LWIP_SO_RCVBUF
-      /* G3P-23754: also gate POLLIN on conn->recv_avail. recv_udp/raw/tcp
-         atomically bumps recv_avail in the same SYS_ARCH_PROTECT critical
-         section as the mbox post, so observing recv_avail > 0 here is a
-         race-free witness that data is queued -- even if rcvevent has not
-         been incremented yet by the (later, separate) API_EVENT call. */
+      /* G3P-23754: also gate POLLIN on conn->recv_avail. recv_avail is bumped
+         directly by recv_udp/raw/tcp on post and by netconn_recv_data on fetch;
+         unlike rcvevent it is NOT routed through event_callback, so it cannot be
+         left stale by a dropped/coalesced RCVPLUS. Checking it here lets a
+         re-scanning poller (the UdpBroker uses a bounded lwip_poll) detect a
+         queued netbuf even when rcvevent is wedged below the true queue depth. */
       int recv_avail = (sock->conn != NULL) ? sock->conn->recv_avail : 0;
 #endif /* LWIP_SO_RCVBUF */
       SYS_ARCH_UNPROTECT(lev);
@@ -2277,11 +2278,12 @@ lwip_pollscan(struct pollfd *fds, nfds_t nfds, enum lwip_pollscan_opts opts)
         u16_t sendevent = sock->sendevent;
         u16_t errevent = sock->errevent;
 #if LWIP_SO_RCVBUF
-        /* G3P-23754: also gate POLLIN on conn->recv_avail. recv_udp/raw/tcp
-           atomically bumps recv_avail in the same SYS_ARCH_PROTECT critical
-           section as the mbox post, so observing recv_avail > 0 here is a
-           race-free witness that data is queued -- even if rcvevent has not
-           been incremented yet by the (later, separate) API_EVENT call. */
+        /* G3P-23754: also gate POLLIN on conn->recv_avail. recv_avail is bumped
+           directly by recv_udp/raw/tcp on post and by netconn_recv_data on fetch;
+           unlike rcvevent it is NOT routed through event_callback, so it cannot be
+           left stale by a dropped/coalesced RCVPLUS. Checking it here lets a
+           re-scanning poller (the UdpBroker uses a bounded lwip_poll) detect a
+           queued netbuf even when rcvevent is wedged below the true queue depth. */
         int recv_avail = (sock->conn != NULL) ? sock->conn->recv_avail : 0;
 #endif /* LWIP_SO_RCVBUF */
 

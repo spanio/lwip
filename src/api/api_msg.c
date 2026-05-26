@@ -190,30 +190,16 @@ recv_raw(void *arg, struct raw_pcb *pcb, struct pbuf *p,
       buf->port = pcb->protocol;
 
       len = q->tot_len;
-      {
-        SYS_ARCH_DECL_PROTECT(lev);
-        /* G3P-23754: Make (mbox post, recv_avail bump) atomic under SYS_ARCH_PROTECT.
-           A reader (lwip_pollscan / lwip_select) inspecting conn->recv_avail under
-           the same lock now cannot observe (mbox has buf, recv_avail == 0). The
-           old code did the post and the rcvevent bump in two separate critical
-           sections; a reader could see (mbox has buf, rcvevent == 0) in between,
-           report nothing readable, and park on the select sem until a later
-           packet nudged things. The wakeup (API_EVENT) is intentionally fired
-           OUTSIDE the protect so sys_sem_signal does not strand the woken
-           consumer on lwip_sys_mutex. */
-        SYS_ARCH_PROTECT(lev);
-        if (sys_mbox_trypost(&conn->recvmbox, buf) != ERR_OK) {
-          SYS_ARCH_UNPROTECT(lev);
-          netbuf_delete(buf);
-          return 0;
-        }
+      if (sys_mbox_trypost(&conn->recvmbox, buf) != ERR_OK) {
+        netbuf_delete(buf);
+        return 0;
+      } else {
 #if LWIP_SO_RCVBUF
-        conn->recv_avail += (int)len;
+        SYS_ARCH_INC(conn->recv_avail, len);
 #endif /* LWIP_SO_RCVBUF */
-        SYS_ARCH_UNPROTECT(lev);
+        /* Register event with callback */
+        API_EVENT(conn, NETCONN_EVT_RCVPLUS, len);
       }
-      /* Register event with callback (outside the protect, see comment above). */
-      API_EVENT(conn, NETCONN_EVT_RCVPLUS, len);
     }
   }
 
@@ -284,28 +270,18 @@ recv_udp(void *arg, struct udp_pcb *pcb, struct pbuf *p,
   }
 
   len = p->tot_len;
-  {
-    SYS_ARCH_DECL_PROTECT(lev);
-    /* G3P-23754: Make (mbox post, recv_avail bump) atomic under SYS_ARCH_PROTECT,
-       but fire API_EVENT outside the protect. See recv_raw above for the
-       rationale -- TL;DR the consumer's pollscan reads recv_avail under the
-       same lock and so cannot observe (mbox has buf, recv_avail == 0); and the
-       wakeup must not strand the woken consumer on lwip_sys_mutex. */
-    SYS_ARCH_PROTECT(lev);
-    err = sys_mbox_trypost(&conn->recvmbox, buf);
-    if (err != ERR_OK) {
-      SYS_ARCH_UNPROTECT(lev);
-      netbuf_delete(buf);
-      LWIP_DEBUGF(API_MSG_DEBUG, ("recv_udp: sys_mbox_trypost failed, err=%d\n", err));
-      return;
-    }
+  err = sys_mbox_trypost(&conn->recvmbox, buf);
+  if (err != ERR_OK) {
+    netbuf_delete(buf);
+    LWIP_DEBUGF(API_MSG_DEBUG, ("recv_udp: sys_mbox_trypost failed, err=%d\n", err));
+    return;
+  } else {
 #if LWIP_SO_RCVBUF
-    conn->recv_avail += (int)len;
+    SYS_ARCH_INC(conn->recv_avail, len);
 #endif /* LWIP_SO_RCVBUF */
-    SYS_ARCH_UNPROTECT(lev);
+    /* Register event with callback */
+    API_EVENT(conn, NETCONN_EVT_RCVPLUS, len);
   }
-  /* Register event with callback (outside the protect, see comment above). */
-  API_EVENT(conn, NETCONN_EVT_RCVPLUS, len);
 }
 #endif /* LWIP_UDP */
 
@@ -355,24 +331,16 @@ recv_tcp(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
     len = 0;
   }
 
-  {
-    SYS_ARCH_DECL_PROTECT(lev);
-    /* G3P-23754: Make (mbox post, recv_avail bump) atomic under SYS_ARCH_PROTECT,
-       but fire API_EVENT outside the protect. See recv_raw above for the
-       rationale. */
-    SYS_ARCH_PROTECT(lev);
-    if (sys_mbox_trypost(&conn->recvmbox, msg) != ERR_OK) {
-      SYS_ARCH_UNPROTECT(lev);
-      /* don't deallocate p: it is presented to us later again from tcp_fasttmr! */
-      return ERR_MEM;
-    }
+  if (sys_mbox_trypost(&conn->recvmbox, msg) != ERR_OK) {
+    /* don't deallocate p: it is presented to us later again from tcp_fasttmr! */
+    return ERR_MEM;
+  } else {
 #if LWIP_SO_RCVBUF
-    conn->recv_avail += (int)len;
+    SYS_ARCH_INC(conn->recv_avail, len);
 #endif /* LWIP_SO_RCVBUF */
-    SYS_ARCH_UNPROTECT(lev);
+    /* Register event with callback */
+    API_EVENT(conn, NETCONN_EVT_RCVPLUS, len);
   }
-  /* Register event with callback (outside the protect, see comment above). */
-  API_EVENT(conn, NETCONN_EVT_RCVPLUS, len);
 
   return ERR_OK;
 }
