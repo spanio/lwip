@@ -192,11 +192,15 @@ recv_raw(void *arg, struct raw_pcb *pcb, struct pbuf *p,
       len = q->tot_len;
       {
         SYS_ARCH_DECL_PROTECT(lev);
-        /* G3P-23754: Hold SYS_ARCH_PROTECT across sys_mbox_trypost AND
-           API_EVENT(NETCONN_EVT_RCVPLUS) so a reader inspecting sock->rcvevent
-           under the same lock cannot observe (mbox has buf, rcvevent == 0).
-           Requires the port's lwip_sys_mutex to be recursive (as
-           sys_arch_protect() is documented to support). */
+        /* G3P-23754: Make (mbox post, recv_avail bump) atomic under SYS_ARCH_PROTECT.
+           A reader (lwip_pollscan / lwip_select) inspecting conn->recv_avail under
+           the same lock now cannot observe (mbox has buf, recv_avail == 0). The
+           old code did the post and the rcvevent bump in two separate critical
+           sections; a reader could see (mbox has buf, rcvevent == 0) in between,
+           report nothing readable, and park on the select sem until a later
+           packet nudged things. The wakeup (API_EVENT) is intentionally fired
+           OUTSIDE the protect so sys_sem_signal does not strand the woken
+           consumer on lwip_sys_mutex. */
         SYS_ARCH_PROTECT(lev);
         if (sys_mbox_trypost(&conn->recvmbox, buf) != ERR_OK) {
           SYS_ARCH_UNPROTECT(lev);
@@ -204,12 +208,12 @@ recv_raw(void *arg, struct raw_pcb *pcb, struct pbuf *p,
           return 0;
         }
 #if LWIP_SO_RCVBUF
-        SYS_ARCH_INC(conn->recv_avail, len);
+        conn->recv_avail += (int)len;
 #endif /* LWIP_SO_RCVBUF */
-        /* Register event with callback */
-        API_EVENT(conn, NETCONN_EVT_RCVPLUS, len);
         SYS_ARCH_UNPROTECT(lev);
       }
+      /* Register event with callback (outside the protect, see comment above). */
+      API_EVENT(conn, NETCONN_EVT_RCVPLUS, len);
     }
   }
 
@@ -282,14 +286,11 @@ recv_udp(void *arg, struct udp_pcb *pcb, struct pbuf *p,
   len = p->tot_len;
   {
     SYS_ARCH_DECL_PROTECT(lev);
-    /* G3P-23754: Hold SYS_ARCH_PROTECT across sys_mbox_trypost AND
-       API_EVENT(NETCONN_EVT_RCVPLUS) so a reader inspecting sock->rcvevent
-       under the same lock cannot observe (mbox has buf, rcvevent == 0).
-       Without this wrap the producer can be preempted between the two,
-       leaving lwip_pollscan to report nothing readable on a socket whose
-       recvmbox already holds a netbuf -- the broker then sleeps until the
-       next signal nudges it. Requires the port's lwip_sys_mutex to be
-       recursive (as sys_arch_protect() is documented to support). */
+    /* G3P-23754: Make (mbox post, recv_avail bump) atomic under SYS_ARCH_PROTECT,
+       but fire API_EVENT outside the protect. See recv_raw above for the
+       rationale -- TL;DR the consumer's pollscan reads recv_avail under the
+       same lock and so cannot observe (mbox has buf, recv_avail == 0); and the
+       wakeup must not strand the woken consumer on lwip_sys_mutex. */
     SYS_ARCH_PROTECT(lev);
     err = sys_mbox_trypost(&conn->recvmbox, buf);
     if (err != ERR_OK) {
@@ -299,12 +300,12 @@ recv_udp(void *arg, struct udp_pcb *pcb, struct pbuf *p,
       return;
     }
 #if LWIP_SO_RCVBUF
-    SYS_ARCH_INC(conn->recv_avail, len);
+    conn->recv_avail += (int)len;
 #endif /* LWIP_SO_RCVBUF */
-    /* Register event with callback */
-    API_EVENT(conn, NETCONN_EVT_RCVPLUS, len);
     SYS_ARCH_UNPROTECT(lev);
   }
+  /* Register event with callback (outside the protect, see comment above). */
+  API_EVENT(conn, NETCONN_EVT_RCVPLUS, len);
 }
 #endif /* LWIP_UDP */
 
@@ -356,11 +357,9 @@ recv_tcp(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
 
   {
     SYS_ARCH_DECL_PROTECT(lev);
-    /* G3P-23754: Hold SYS_ARCH_PROTECT across sys_mbox_trypost AND
-       API_EVENT(NETCONN_EVT_RCVPLUS) so a reader inspecting sock->rcvevent
-       under the same lock cannot observe (mbox has msg, rcvevent == 0).
-       Requires the port's lwip_sys_mutex to be recursive (as
-       sys_arch_protect() is documented to support). */
+    /* G3P-23754: Make (mbox post, recv_avail bump) atomic under SYS_ARCH_PROTECT,
+       but fire API_EVENT outside the protect. See recv_raw above for the
+       rationale. */
     SYS_ARCH_PROTECT(lev);
     if (sys_mbox_trypost(&conn->recvmbox, msg) != ERR_OK) {
       SYS_ARCH_UNPROTECT(lev);
@@ -368,12 +367,12 @@ recv_tcp(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
       return ERR_MEM;
     }
 #if LWIP_SO_RCVBUF
-    SYS_ARCH_INC(conn->recv_avail, len);
+    conn->recv_avail += (int)len;
 #endif /* LWIP_SO_RCVBUF */
-    /* Register event with callback */
-    API_EVENT(conn, NETCONN_EVT_RCVPLUS, len);
     SYS_ARCH_UNPROTECT(lev);
   }
+  /* Register event with callback (outside the protect, see comment above). */
+  API_EVENT(conn, NETCONN_EVT_RCVPLUS, len);
 
   return ERR_OK;
 }
