@@ -1901,11 +1901,24 @@ lwip_selscan(int maxfdp1, fd_set *readset_in, fd_set *writeset_in, fd_set *excep
       s16_t rcvevent = sock->rcvevent;
       u16_t sendevent = sock->sendevent;
       u16_t errevent = sock->errevent;
+#if LWIP_SO_RCVBUF
+      /* G3P-23754: also gate POLLIN on conn->recv_avail. recv_udp/raw/tcp
+         atomically bumps recv_avail in the same SYS_ARCH_PROTECT critical
+         section as the mbox post, so observing recv_avail > 0 here is a
+         race-free witness that data is queued -- even if rcvevent has not
+         been incremented yet by the (later, separate) API_EVENT call. */
+      int recv_avail = (sock->conn != NULL) ? sock->conn->recv_avail : 0;
+#endif /* LWIP_SO_RCVBUF */
       SYS_ARCH_UNPROTECT(lev);
 
       /* ... then examine it: */
       /* See if netconn of this socket is ready for read */
+#if LWIP_SO_RCVBUF
+      if (readset_in && FD_ISSET(i, readset_in) &&
+          ((lastdata != NULL) || (rcvevent > 0) || (recv_avail > 0))) {
+#else
       if (readset_in && FD_ISSET(i, readset_in) && ((lastdata != NULL) || (rcvevent > 0))) {
+#endif /* LWIP_SO_RCVBUF */
         FD_SET(i, &lreadset);
         LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_selscan: fd=%d ready for reading\n", i));
         nready++;
@@ -2263,6 +2276,14 @@ lwip_pollscan(struct pollfd *fds, nfds_t nfds, enum lwip_pollscan_opts opts)
         s16_t rcvevent = sock->rcvevent;
         u16_t sendevent = sock->sendevent;
         u16_t errevent = sock->errevent;
+#if LWIP_SO_RCVBUF
+        /* G3P-23754: also gate POLLIN on conn->recv_avail. recv_udp/raw/tcp
+           atomically bumps recv_avail in the same SYS_ARCH_PROTECT critical
+           section as the mbox post, so observing recv_avail > 0 here is a
+           race-free witness that data is queued -- even if rcvevent has not
+           been incremented yet by the (later, separate) API_EVENT call. */
+        int recv_avail = (sock->conn != NULL) ? sock->conn->recv_avail : 0;
+#endif /* LWIP_SO_RCVBUF */
 
         if ((opts & LWIP_POLLSCAN_INC_WAIT) != 0) {
           sock->select_waiting++;
@@ -2286,7 +2307,12 @@ lwip_pollscan(struct pollfd *fds, nfds_t nfds, enum lwip_pollscan_opts opts)
 
         /* ... then examine it: */
         /* See if netconn of this socket is ready for read */
+#if LWIP_SO_RCVBUF
+        if ((fds[fdi].events & POLLIN) != 0 &&
+            ((lastdata != NULL) || (rcvevent > 0) || (recv_avail > 0))) {
+#else
         if ((fds[fdi].events & POLLIN) != 0 && ((lastdata != NULL) || (rcvevent > 0))) {
+#endif /* LWIP_SO_RCVBUF */
           fds[fdi].revents |= POLLIN;
           LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_pollscan: fd=%d ready for reading\n", fds[fdi].fd));
         }
